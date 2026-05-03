@@ -5,7 +5,6 @@ import (
 
 	authHandler "lead_scrapper_be/internal/handler/auth"
 	leadHandler "lead_scrapper_be/internal/handler/lead"
-	jwt_middleware "lead_scrapper_be/internal/middleware/jwt"
 
 	"github.com/labstack/echo/v4"
 )
@@ -34,6 +33,5 @@ func authRoutes(api *echo.Group, app *setup.Application) {
 func leadRoutes(api *echo.Group, app *setup.Application) {
 	leadHandler := leadHandler.NewLeadHandler(app)
 
-	api.Use(jwt_middleware.JWTMiddleware(app))
 	api.POST("/scrap", leadHandler.Scrap)
 }

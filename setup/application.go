@@ -1,19 +1,21 @@
-
-			package setup
+package setup
 
 import (
-	"log"
 	"lead_scrapper_be/internal/config"
 	"lead_scrapper_be/internal/db"
 	"lead_scrapper_be/pkg/logger"
+	"lead_scrapper_be/pkg/queue"
+
+	"log"
 
 	"gorm.io/gorm"
 )
 
 type Application struct {
-	DB     *gorm.DB
-	Config *config.Config
-	Logger logger.Logger
+	DB        *gorm.DB
+	Config    *config.Config
+	Logger    logger.Logger
+	QueueList []queue.JobQueue
 }
 
 func NewApplication() *Application {
@@ -34,9 +36,13 @@ func NewApplication() *Application {
 		log.Fatalf("failed to initialize database: %v", err)
 	}
 
+	// Queue and Worker Initializer
+	queueList := queue.InitQueue(db)
+
 	return &Application{
-		DB:     db,
-		Config: cfg,
-		Logger: logger,
+		DB:        db,
+		Config:    cfg,
+		Logger:    logger,
+		QueueList: queueList,
 	}
 }

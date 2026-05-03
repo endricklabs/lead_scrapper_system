@@ -12,7 +12,7 @@ func Init(connStr string) (*gorm.DB, error) {
 		return nil, err
 	}
 
-	db.AutoMigrate(&model.User{})
+	db.AutoMigrate(&model.User{}, &model.Lead{})
 
 	return db, nil
 }
