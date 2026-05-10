@@ -3,6 +3,7 @@ package lead_service
 import (
 	lead_dto "lead_scrapper_be/internal/dto/lead"
 	"lead_scrapper_be/setup"
+	"sync"
 
 	"github.com/labstack/echo/v4"
 )
@@ -19,17 +20,19 @@ func NewLeadService(app *setup.Application) LeadService {
 
 func (s leadService) Scrap(c echo.Context, leadScrapRequest lead_dto.LeadScrapRequest) error {
 
+	var wg sync.WaitGroup
+
 	// enqueue the jobs
 	for _, reqSource := range leadScrapRequest.Source {
 		for i := range s.app.QueueList {
 			if s.app.QueueList[i].Source == string(reqSource.Source) {
 				// Enqueue the requested number of jobs
-				for j := int64(0); j < reqSource.NumberOfRequest; j++ {
-					s.app.QueueList[i].Enqueue(string(reqSource.Source), leadScrapRequest.IndustryType, leadScrapRequest.Location)
-				}
+				wg.Add(1)
+				s.app.QueueList[i].Enqueue(string(reqSource.Source), leadScrapRequest.IndustryType, leadScrapRequest.Location, int(reqSource.NumberOfRequest), &wg)
 			}
 		}
 	}
 
+	wg.Wait()
 	return nil
 }

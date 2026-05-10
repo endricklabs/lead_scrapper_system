@@ -20,6 +20,17 @@ func NewLeadHandler(app *setup.Application) *LeadHandler {
 	}
 }
 
+// Scrap
+// @Summary Scrap leads from multiple sources
+// @Description Start a lead scrapping job for the specified industry and location across multiple sources (Google Maps, LinkedIn, etc.)
+// @Tags Lead
+// @Accept json
+// @Produce json
+// @Param request body lead_dto.LeadScrapRequest true "Scrap Request"
+// @Success 200 {object} api_dto.ApiResponse
+// @Failure 400 {object} api_dto.ApiResponse
+// @Failure 500 {object} api_dto.ApiResponse
+// @Router /lead/scrap [post]
 func (h *LeadHandler) Scrap(c echo.Context) error {
 	var leadScrapRequest lead_dto.LeadScrapRequest
 	if err := c.Bind(&leadScrapRequest); err != nil {

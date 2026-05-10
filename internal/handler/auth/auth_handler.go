@@ -19,6 +19,17 @@ func NewAuthHandler(app *setup.Application) *AuthHandler {
 	}
 }
 
+// Signup
+// @Summary Register a new user
+// @Description Create a new user account with email and password
+// @Tags Auth
+// @Accept json
+// @Produce json
+// @Param request body auth_dto.SignupRequest true "Signup Request"
+// @Success 200 {object} api_dto.ApiResponse
+// @Failure 400 {object} api_dto.ApiResponse
+// @Failure 500 {object} api_dto.ApiResponse
+// @Router /auth/signup [post]
 func (h *AuthHandler) Signup(c echo.Context) error {
 	var signupRequest auth_dto.SignupRequest
 	if err := c.Bind(&signupRequest); err != nil {
@@ -37,6 +48,17 @@ func (h *AuthHandler) Signup(c echo.Context) error {
 	return api.SuccessfulResponse(c, "User registered successfully")
 }
 
+// Login
+// @Summary User login
+// @Description Authenticate user and return access token
+// @Tags Auth
+// @Accept json
+// @Produce json
+// @Param request body auth_dto.LoginRequest true "Login Request"
+// @Success 200 {object} api_dto.ApiResponse{data=auth_dto.LoginResponse}
+// @Failure 400 {object} api_dto.ApiResponse
+// @Failure 401 {object} api_dto.ApiResponse
+// @Router /auth/login [post]
 func (h *AuthHandler) Login(c echo.Context) error {
 	var loginRequest auth_dto.LoginRequest
 	if err := c.Bind(&loginRequest); err != nil {

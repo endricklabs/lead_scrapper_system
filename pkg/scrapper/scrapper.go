@@ -3,118 +3,143 @@ package scrapper
 import (
 	"context"
 	"fmt"
-	"lead_scrapper_be/internal/model"
+	"log"
 	"time"
 
 	"github.com/chromedp/chromedp"
 	"gorm.io/gorm"
 )
 
-// semaphore limits the number of concurrent Chrome instances to prevent resource exhaustion
-var sem = make(chan struct{}, 3)
+type Lead struct {
+	Name string
+	URL  string
+}
 
-func ScrapGoogleMaps(db *gorm.DB, industryType, location string) {
-	// fmt.Printf("[Google Maps Scraper] Scraping leads for %s in %s...\n", industryType, location)
+func ScrapeLeads(ctx context.Context, industry, location string, target int) ([]Lead, error) {
 
-	// Acquire semaphore slot - blocks if 3 Chrome instances are already running
-	sem <- struct{}{}
-	defer func() { <-sem }() // Release slot when done
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", true),
-		chromedp.Flag("no-sandbox", true),
-		chromedp.Flag("disable-gpu", true),
-	)
-	allocCtx, allocCancel := chromedp.NewExecAllocator(ctx, opts...)
-	defer allocCancel()
-
-	ctx, cancel = chromedp.NewContext(allocCtx)
-	defer cancel()
-
-	var titles []string
-	searchURL := fmt.Sprintf("https://www.google.com/maps/search/%s+in+%s", industryType, location)
+	query := industry + " in " + location
+	results := []Lead{}
 
 	err := chromedp.Run(ctx,
-		chromedp.Navigate(searchURL),
-		// Wait for at least one result to appear before extracting
-		chromedp.WaitVisible(`div[role="feed"]`, chromedp.ByQuery),
-		chromedp.Sleep(2*time.Second),
-		// Extract business names - try multiple selectors to be resilient
-		chromedp.Evaluate(`
-			Array.from(document.querySelectorAll('.qBF1Pd, .NrDZNb .fontHeadlineSmall, [jstcache] .qBF1Pd'))
-				.map(e => e.innerText)
-				.filter(t => t.trim() !== '')
-		`, &titles),
+
+		chromedp.Navigate("https://www.google.com/maps?hl=en"),
+		chromedp.Sleep(6*time.Second),
+
+		// search
+		chromedp.Click(`input[name="q"]`, chromedp.ByQuery),
+		chromedp.SendKeys(`input[name="q"]`, query, chromedp.ByQuery),
+		chromedp.KeyEvent("\r"),
+
+		chromedp.Sleep(10*time.Second),
 	)
 
 	if err != nil {
-		fmt.Printf("[Google Maps] Error: %v\n", err)
-		return
+		return nil, err
 	}
 
-	if len(titles) == 0 {
-		fmt.Printf("[Google Maps] No results found for %s in %s\n", industryType, location)
-		return
-	}
+	seen := map[string]bool{}
 
-	// --- Fast deduplication: fetch all existing leads for this source+location in ONE query ---
-	var existingNames []string
-	db.Model(&model.Lead{}).
-		Where("source = ? AND location = ?", "google_maps", location).
-		Pluck("name", &existingNames)
+	for len(results) < target {
 
-	// Load into a set (map) for O(1) lookups
-	seen := make(map[string]struct{}, len(existingNames))
-	for _, n := range existingNames {
-		seen[n] = struct{}{}
-	}
-	// --------------------------------------------------------------------------------------
+		var batch []Lead
 
-	var newLeads []model.Lead
-	for _, title := range titles {
-		if title == "" {
-			continue
+		err := chromedp.Run(ctx,
+
+			// wait feed
+			chromedp.WaitVisible(`div[role="feed"]`, chromedp.ByQuery),
+
+			// extract visible results
+			chromedp.Evaluate(`
+			(() => {
+				const items = document.querySelectorAll('a.hfpxzc');
+
+				return Array.from(items).map(el => ({
+					Name: el.getAttribute('aria-label'),
+					URL: el.href
+				}));
+			})()
+			`, &batch),
+
+			// scroll for more
+			chromedp.Evaluate(`
+			(() => {
+				const feed = document.querySelector('div[role="feed"]');
+				if (feed) feed.scrollBy(0, 1500);
+			})()
+			`, nil),
+
+			chromedp.Sleep(2*time.Second),
+		)
+
+		if err != nil {
+			return nil, err
 		}
-		if _, exists := seen[title]; exists {
-			// Already in DB or already queued in this batch - skip
-			continue
+
+		// dedupe
+		for _, b := range batch {
+
+			if len(results) >= target {
+				break
+			}
+
+			if b.Name == "" || seen[b.URL] {
+				continue
+			}
+
+			seen[b.URL] = true
+
+			results = append(results, b)
+
+			fmt.Println("Collected:", len(results))
 		}
-		// Mark as seen so other workers in the same batch don't double-insert
-		seen[title] = struct{}{}
-		newLeads = append(newLeads, model.Lead{
-			Name:         title,
-			IndustryType: industryType,
-			Location:     location,
-			Source:       "google_maps",
-		})
 	}
 
-	if len(newLeads) == 0 {
-		fmt.Printf("[Google Maps] All results already stored for %s in %s\n", industryType, location)
-		return
-	}
-
-	// Bulk insert all new leads in one DB call
-	db.Create(&newLeads)
-	for _, l := range newLeads {
-		fmt.Printf("[Google Maps] New lead saved: %s\n", l.Name)
-	}
+	return results, nil
 }
 
-func ScrapLinkedIn(db *gorm.DB, industryType, location string) {
+func ScrapGoogleMaps(db *gorm.DB, industryType, location string, numberOfRequest int) {
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Flag("headless", false),
+		chromedp.Flag("no-sandbox", true),
+	)
+
+	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
+	defer cancel()
+
+	ctx, cancel := chromedp.NewContext(allocCtx)
+	defer cancel()
+
+	ctx, cancel = context.WithTimeout(ctx, 180*time.Second)
+	defer cancel()
+
+	leads, err := ScrapeLeads(ctx, industryType, location, numberOfRequest)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println("\n📍 FINAL LEADS:\n")
+
+	for i, l := range leads {
+		fmt.Printf("%d.\nName: %s\nMaps URL: %s\n\n",
+			i+1,
+			l.Name,
+			l.URL,
+		)
+	}
+
+}
+
+func ScrapLinkedIn(db *gorm.DB, industryType, location string, numberOfRequest int) {
 	fmt.Printf("[LinkedIn Scraper] Scraping leads for %s in %s...\n", industryType, location)
 	// Placeholder: LinkedIn requires auth - implement later
 }
 
-func ScrapFacebook(db *gorm.DB, industryType, location string) {
+func ScrapFacebook(db *gorm.DB, industryType, location string, numberOfRequest int) {
 	fmt.Printf("[Facebook Scraper] Scraping leads for %s in %s...\n", industryType, location)
 	// Placeholder
 }
 
-func ScrapInstagram(db *gorm.DB, industryType, location string) {
+func ScrapInstagram(db *gorm.DB, industryType, location string, numberOfRequest int) {
 	fmt.Printf("[Instagram Scraper] Scraping leads for %s in %s...\n", industryType, location)
 	// Placeholder
 }

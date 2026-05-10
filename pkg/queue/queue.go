@@ -9,45 +9,41 @@ import (
 )
 
 type Job struct {
-	Source       string
-	IndustryType string
-	Location     string
+	Source          string
+	IndustryType    string
+	Location        string
+	NumberOfRequest int
+	Wg              *sync.WaitGroup // Track specific jobs
 }
 
 type JobQueue struct {
 	Id     int64
 	Source string
 	Jobs   chan Job
-	wg     *sync.WaitGroup //Each queue has it's pool of workers managed by this WaitGroup
 	DB     *gorm.DB
 }
 
 func NewJobQueue(size int64, id int64, db *gorm.DB) *JobQueue {
 	return &JobQueue{
-		Id:     id,
-		Jobs:   make(chan Job, size),
-		wg:     &sync.WaitGroup{},
-		DB:     db,
+		Id:   id,
+		Jobs: make(chan Job, size),
+		DB:   db,
 	}
 }
 
-func (j *JobQueue) Enqueue(source string, industryType string, location string) {
+func (j *JobQueue) Enqueue(source string, industryType string, location string, numberOfRequest int, wg *sync.WaitGroup) {
 	j.Jobs <- Job{
-		Source:       source,
-		IndustryType: industryType,
-		Location:     location,
+		Source:          source,
+		IndustryType:    industryType,
+		Location:        location,
+		NumberOfRequest: numberOfRequest,
+		Wg:              wg,
 	}
-}
-
-func (j *JobQueue) Wait() {
-	j.wg.Wait()
 }
 
 //
 
-func worker(id int, jobs <-chan Job, wg *sync.WaitGroup, db *gorm.DB) {
-	defer wg.Done()
-
+func worker(id int, jobs <-chan Job, db *gorm.DB) {
 	for {
 		job, ok := <-jobs
 		if !ok {
@@ -57,23 +53,26 @@ func worker(id int, jobs <-chan Job, wg *sync.WaitGroup, db *gorm.DB) {
 
 		switch job.Source {
 		case "google_maps":
-			scrapper.ScrapGoogleMaps(db, job.IndustryType, job.Location)
+			scrapper.ScrapGoogleMaps(db, job.IndustryType, job.Location, job.NumberOfRequest)
 		case "linked_in":
-			scrapper.ScrapLinkedIn(db, job.IndustryType, job.Location)
+			scrapper.ScrapLinkedIn(db, job.IndustryType, job.Location, job.NumberOfRequest)
 		case "facebook":
-			scrapper.ScrapFacebook(db, job.IndustryType, job.Location)
+			scrapper.ScrapFacebook(db, job.IndustryType, job.Location, job.NumberOfRequest)
 		case "instagram":
-			scrapper.ScrapInstagram(db, job.IndustryType, job.Location)
+			scrapper.ScrapInstagram(db, job.IndustryType, job.Location, job.NumberOfRequest)
 		default:
 			fmt.Printf("Worker %d processing source %s, industry %s, location %s\n", id, job.Source, job.IndustryType, job.Location)
+		}
+
+		if job.Wg != nil {
+			job.Wg.Done()
 		}
 	}
 }
 
 func (j *JobQueue) StartWorkers(numberOfWorkers int) {
 	for i := 1; i <= numberOfWorkers; i++ {
-		j.wg.Add(1)
-		go worker(i, j.Jobs, j.wg, j.DB)
+		go worker(i, j.Jobs, j.DB)
 	}
 }
 
@@ -91,4 +90,3 @@ func InitQueue(db *gorm.DB) []JobQueue {
 
 	return QueueList
 }
-

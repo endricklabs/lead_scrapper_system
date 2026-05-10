@@ -9,9 +9,26 @@ import (
 
 	"lead_scrapper_be/pkg/validator"
 
+	_ "lead_scrapper_be/docs"
+
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 )
+
+// @title Lead Scrapper API
+// @version 1.0
+// @description This is a lead scrapping system API.
+// @termsOfService http://swagger.io/terms/
+
+// @contact.name API Support
+// @contact.url http://www.swagger.io/support
+// @contact.email support@swagger.io
+
+// @license.name Apache 2.0
+// @license.url http://www.apache.org/licenses/LICENSE-2.0.html
+
+// @host localhost:8080
+// @BasePath /api/v1
 
 func main() {
 	e := echo.New()

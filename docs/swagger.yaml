@@ -1,0 +1,183 @@
+basePath: /api/v1
+definitions:
+  api_dto.ApiResponse:
+    properties:
+      data: {}
+      message:
+        type: string
+    type: object
+  auth_dto.LoginRequest:
+    properties:
+      email:
+        type: string
+      password:
+        type: string
+    required:
+    - email
+    - password
+    type: object
+  auth_dto.LoginResponse:
+    properties:
+      access_token:
+        type: string
+    type: object
+  auth_dto.SignupRequest:
+    properties:
+      email:
+        type: string
+      password:
+        minLength: 6
+        type: string
+    required:
+    - email
+    - password
+    type: object
+  lead_dto.LeadScrapRequest:
+    properties:
+      industry_type:
+        type: string
+      location:
+        type: string
+      source:
+        description: NumberOfRequest int64        `json:"number_of_request" validate:"required"`
+        items:
+          $ref: '#/definitions/lead_dto.SourceData'
+        type: array
+    required:
+    - industry_type
+    - location
+    - source
+    type: object
+  lead_dto.Source:
+    enum:
+    - google_maps
+    - linked_in
+    - facebook
+    - instagram
+    type: string
+    x-enum-varnames:
+    - GoogleMap
+    - LinkedIn
+    - Facebook
+    - Instagram
+  lead_dto.SourceData:
+    properties:
+      number_of_request:
+        type: integer
+      source:
+        $ref: '#/definitions/lead_dto.Source'
+    required:
+    - number_of_request
+    - source
+    type: object
+host: localhost:8080
+info:
+  contact:
+    email: support@swagger.io
+    name: API Support
+    url: http://www.swagger.io/support
+  description: This is a lead scrapping system API.
+  license:
+    name: Apache 2.0
+    url: http://www.apache.org/licenses/LICENSE-2.0.html
+  termsOfService: http://swagger.io/terms/
+  title: Lead Scrapper API
+  version: "1.0"
+paths:
+  /auth/login:
+    post:
+      consumes:
+      - application/json
+      description: Authenticate user and return access token
+      parameters:
+      - description: Login Request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/auth_dto.LoginRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/api_dto.ApiResponse'
+            - properties:
+                data:
+                  $ref: '#/definitions/auth_dto.LoginResponse'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api_dto.ApiResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api_dto.ApiResponse'
+      summary: User login
+      tags:
+      - Auth
+  /auth/signup:
+    post:
+      consumes:
+      - application/json
+      description: Create a new user account with email and password
+      parameters:
+      - description: Signup Request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/auth_dto.SignupRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api_dto.ApiResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api_dto.ApiResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api_dto.ApiResponse'
+      summary: Register a new user
+      tags:
+      - Auth
+  /lead/scrap:
+    post:
+      consumes:
+      - application/json
+      description: Start a lead scrapping job for the specified industry and location
+        across multiple sources (Google Maps, LinkedIn, etc.)
+      parameters:
+      - description: Scrap Request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/lead_dto.LeadScrapRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api_dto.ApiResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api_dto.ApiResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api_dto.ApiResponse'
+      summary: Scrap leads from multiple sources
+      tags:
+      - Lead
+swagger: "2.0"
