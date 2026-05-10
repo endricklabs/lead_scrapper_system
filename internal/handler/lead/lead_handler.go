@@ -46,5 +46,5 @@ func (h *LeadHandler) Scrap(c echo.Context) error {
 		return api.InternalServerError(c, err.Error())
 	}
 
-	return api.SuccessfulResponse(c, "Scrapped successfully")
+	return api.SuccessfulResponse(c, "Lead Scrapper triggered successfully")
 }
