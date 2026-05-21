@@ -4,7 +4,7 @@ type Source string
 
 const (
 	GoogleMap Source = "google_maps"
-	LinkedIn  Source = "linked_in"
+	// LinkedIn  Source = "linked_in"
 	Facebook  Source = "facebook"
 	Instagram Source = "instagram"
 )

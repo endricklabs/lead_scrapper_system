@@ -3,6 +3,7 @@ package queue
 import (
 	"fmt"
 	"lead_scrapper_be/pkg/scrapper"
+	"sync"
 
 	"gorm.io/gorm"
 )
@@ -12,6 +13,7 @@ type Job struct {
 	IndustryType    string
 	Location        string
 	NumberOfRequest int
+	WG              *sync.WaitGroup
 }
 
 type JobQueue struct {
@@ -29,12 +31,13 @@ func NewJobQueue(size int64, id int64, db *gorm.DB) *JobQueue {
 	}
 }
 
-func (j *JobQueue) Enqueue(source string, industryType string, location string, numberOfRequest int) {
+func (j *JobQueue) Enqueue(source string, industryType string, location string, numberOfRequest int, wg *sync.WaitGroup) {
 	j.Jobs <- Job{
 		Source:          source,
 		IndustryType:    industryType,
 		Location:        location,
 		NumberOfRequest: numberOfRequest,
+		WG:              wg,
 	}
 }
 
@@ -59,6 +62,10 @@ func worker(id int, jobs <-chan Job, db *gorm.DB) {
 			scrapper.ScrapInstagram(db, job.IndustryType, job.Location, job.NumberOfRequest)
 		default:
 			fmt.Printf("Worker %d processing source %s, industry %s, location %s\n", id, job.Source, job.IndustryType, job.Location)
+		}
+
+		if job.WG != nil {
+			job.WG.Done()
 		}
 	}
 }

@@ -251,13 +251,11 @@ const docTemplate = `{
             "type": "string",
             "enum": [
                 "google_maps",
-                "linked_in",
                 "facebook",
                 "instagram"
             ],
             "x-enum-varnames": [
                 "GoogleMap",
-                "LinkedIn",
                 "Facebook",
                 "Instagram"
             ]

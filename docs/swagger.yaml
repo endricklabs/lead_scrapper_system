@@ -51,13 +51,11 @@ definitions:
   lead_dto.Source:
     enum:
     - google_maps
-    - linked_in
     - facebook
     - instagram
     type: string
     x-enum-varnames:
     - GoogleMap
-    - LinkedIn
     - Facebook
     - Instagram
   lead_dto.SourceData:
