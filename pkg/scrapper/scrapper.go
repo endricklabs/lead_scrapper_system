@@ -15,82 +15,96 @@ type Lead struct {
 	URL  string
 }
 
-func ScrapeGoogleMapsLeads(ctx context.Context, industry, location string, target int) ([]Lead, error) {
+// ─── Google Maps ──────────────────────────────────────────────────────────────
 
+func ScrapeGoogleMapsLeads(ctx context.Context, industry, location string, target int) ([]Lead, error) {
 	query := industry + " in " + location
 	results := []Lead{}
 
 	err := chromedp.Run(ctx,
+		// Patch navigator before any page loads
+		InjectStealthJS(),
 
 		chromedp.Navigate("https://www.google.com/maps?hl=en"),
-		chromedp.Sleep(6*time.Second),
 
-		// search
+		// Human-like wait after page load: 5–9 s
+		HumanSleep(5*time.Second, 9*time.Second),
+
+		// Click the search box first (humans click before typing)
 		chromedp.Click(`input[name="q"]`, chromedp.ByQuery),
-		chromedp.SendKeys(`input[name="q"]`, query, chromedp.ByQuery),
+		HumanSleep(300*time.Millisecond, 800*time.Millisecond),
+
+		// Type character-by-character like a real user
+		HumanType(`input[name="q"]`, query),
+		HumanSleep(400*time.Millisecond, 900*time.Millisecond),
+
+		// Press Enter
 		chromedp.KeyEvent("\r"),
 
-		chromedp.Sleep(10*time.Second),
+		// Wait for results to load: 8–13 s
+		HumanSleep(8*time.Second, 13*time.Second),
 	)
-
 	if err != nil {
 		return nil, err
 	}
 
 	seen := map[string]bool{}
+	stallCount := 0 // detect end-of-results / stall
 
 	for len(results) < target {
-
 		var batch []Lead
 
 		err := chromedp.Run(ctx,
-
-			// wait feed
+			// Wait for feed
 			chromedp.WaitVisible(`div[role="feed"]`, chromedp.ByQuery),
 
-			// extract visible results
+			// Extract visible results
 			chromedp.Evaluate(`
 			(() => {
 				const items = document.querySelectorAll('a.hfpxzc');
-
 				return Array.from(items).map(el => ({
 					Name: el.getAttribute('aria-label'),
-					URL: el.href
+					URL:  el.href
 				}));
 			})()
 			`, &batch),
 
-			// scroll for more
-			chromedp.Evaluate(`
-			(() => {
-				const feed = document.querySelector('div[role="feed"]');
-				if (feed) feed.scrollBy(0, 1500);
-			})()
-			`, nil),
+			// Randomised scroll
+			HumanScrollFeed(),
 
-			chromedp.Sleep(2*time.Second),
+			// Human-like inter-scroll pause: 1.5–4 s
+			HumanSleep(1500*time.Millisecond, 4*time.Second),
 		)
-
 		if err != nil {
 			return nil, err
 		}
 
-		// dedupe
-		for _, b := range batch {
+		prevLen := len(results)
 
+		// Dedupe
+		for _, b := range batch {
 			if len(results) >= target {
 				break
 			}
-
 			if b.Name == "" || seen[b.URL] {
 				continue
 			}
-
 			seen[b.URL] = true
-
 			results = append(results, b)
-
 			fmt.Println("Collected:", len(results))
+		}
+
+		// Stall detection – stop if we haven't gathered new leads for 3 cycles
+		if len(results) == prevLen {
+			stallCount++
+			if stallCount >= 3 {
+				fmt.Println("[GoogleMaps] No new results after 3 scrolls, stopping early.")
+				break
+			}
+			// Extra wait on stall before retrying
+			chromedp.Sleep(2 * time.Second).Do(ctx) //nolint:errcheck
+		} else {
+			stallCount = 0
 		}
 	}
 
@@ -98,10 +112,8 @@ func ScrapeGoogleMapsLeads(ctx context.Context, industry, location string, targe
 }
 
 func ScrapGoogleMaps(db *gorm.DB, industryType, location string, numberOfRequest int) {
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", false),
-		chromedp.Flag("no-sandbox", true),
-	)
+	proxyURL := GlobalProxyPool.GetNext()
+	opts := StealthAllocatorOptions(proxyURL)
 
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
 	defer cancel()
@@ -109,7 +121,8 @@ func ScrapGoogleMaps(db *gorm.DB, industryType, location string, numberOfRequest
 	ctx, cancel := chromedp.NewContext(allocCtx)
 	defer cancel()
 
-	ctx, cancel = context.WithTimeout(ctx, 180*time.Second)
+	// Generous timeout (stealth mode is slower)
+	ctx, cancel = context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
 	leads, err := ScrapeGoogleMapsLeads(ctx, industryType, location, numberOfRequest)
@@ -118,126 +131,24 @@ func ScrapGoogleMaps(db *gorm.DB, industryType, location string, numberOfRequest
 	}
 
 	fmt.Println("\n📍 FINAL LEADS:\n")
-
 	for i, l := range leads {
-		fmt.Printf("%d.\nName: %s\nMaps URL: %s\n\n",
-			i+1,
-			l.Name,
-			l.URL,
-		)
-	}
-
-}
-
-func ScrapeLinkedInLeads(ctx context.Context, industry, location string, target int) ([]Lead, error) {
-	// LinkedIn public company search: no login required for basic results
-	searchURL := fmt.Sprintf(
-		"https://www.linkedin.com/search/results/companies/?keywords=%s%%20%s&origin=GLOBAL_SEARCH_HEADER",
-		industry, location,
-	)
-
-	results := []Lead{}
-	seen := map[string]bool{}
-
-	err := chromedp.Run(ctx,
-		chromedp.Navigate(searchURL),
-		chromedp.Sleep(6*time.Second),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	for len(results) < target {
-		var batch []Lead
-
-		err := chromedp.Run(ctx,
-			// wait for result cards
-			chromedp.WaitVisible(`.search-results-container`, chromedp.ByQuery),
-
-			// extract company name + URL from each result card
-			chromedp.Evaluate(`
-			(() => {
-				const cards = document.querySelectorAll('.entity-result__item');
-				return Array.from(cards).map(card => {
-					const anchor = card.querySelector('.app-aware-link[href*="/company/"]');
-					const nameEl = card.querySelector('.entity-result__title-text');
-					if (!anchor || !nameEl) return null;
-					return {
-						Name: nameEl.innerText.trim(),
-						URL:  anchor.href.split('?')[0],
-					};
-				}).filter(Boolean);
-			})()
-			`, &batch),
-
-			// scroll down for more results
-			chromedp.Evaluate(`window.scrollBy(0, 1500)`, nil),
-			chromedp.Sleep(2*time.Second),
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		prevLen := len(results)
-		for _, b := range batch {
-			if len(results) >= target {
-				break
-			}
-			if b.Name == "" || seen[b.URL] {
-				continue
-			}
-			seen[b.URL] = true
-			results = append(results, b)
-			fmt.Println("Collected:", len(results))
-		}
-
-		// no new results after a scroll → we've hit the end of the page
-		if len(results) == prevLen {
-			fmt.Println("[LinkedIn] No new results after scroll, stopping early.")
-			break
-		}
-	}
-
-	return results, nil
-}
-
-func ScrapLinkedIn(db *gorm.DB, industryType, location string, numberOfRequest int) {
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", false),
-		chromedp.Flag("no-sandbox", true),
-	)
-
-	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
-	defer cancel()
-
-	ctx, cancel := chromedp.NewContext(allocCtx)
-	defer cancel()
-
-	ctx, cancel = context.WithTimeout(ctx, 180*time.Second)
-	defer cancel()
-
-	leads, err := ScrapeLinkedInLeads(ctx, industryType, location, numberOfRequest)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Println("\n🔗 FINAL LEADS (LinkedIn):\n")
-
-	for i, l := range leads {
-		fmt.Printf("%d.\nName: %s\nLinkedIn URL: %s\n\n",
-			i+1,
-			l.Name,
-			l.URL,
-		)
+		fmt.Printf("%d.\nName: %s\nMaps URL: %s\n\n", i+1, l.Name, l.URL)
 	}
 }
+
+// ─── LinkedIn ─────────────────────────────────────────────────────────────────
+
+func ScrapLinkedIn(db *gorm.DB, industry, location string, target int) ([]Lead, error) {
+	fmt.Printf("[LinkedIn Scraper] Scraping leads for %s in %s...\n", industry, location)
+	return nil, nil
+}
+
+// ─── Stubs ────────────────────────────────────────────────────────────────────
 
 func ScrapFacebook(db *gorm.DB, industryType, location string, numberOfRequest int) {
 	fmt.Printf("[Facebook Scraper] Scraping leads for %s in %s...\n", industryType, location)
-	// Placeholder
 }
 
 func ScrapInstagram(db *gorm.DB, industryType, location string, numberOfRequest int) {
 	fmt.Printf("[Instagram Scraper] Scraping leads for %s in %s...\n", industryType, location)
-	// Placeholder
 }
