@@ -2,18 +2,22 @@ package queue
 
 import (
 	"fmt"
+	"lead_scrapper_be/internal/config"
+	"lead_scrapper_be/internal/model"
+	"lead_scrapper_be/pkg/logger"
 	"lead_scrapper_be/pkg/scrapper"
-	"sync"
 
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
 type Job struct {
+	JobID           uuid.UUID
 	Source          string
 	IndustryType    string
 	Location        string
 	NumberOfRequest int
-	WG              *sync.WaitGroup
+	LeadsCollected  int
 }
 
 type JobQueue struct {
@@ -21,70 +25,88 @@ type JobQueue struct {
 	Source string
 	Jobs   chan Job
 	DB     *gorm.DB
+	Config *config.Config
+	Logger logger.Logger
 }
 
-func NewJobQueue(size int64, id int64, db *gorm.DB) *JobQueue {
+func NewJobQueue(size int64, id int64, db *gorm.DB, cfg *config.Config, log logger.Logger) *JobQueue {
 	return &JobQueue{
-		Id:   id,
-		Jobs: make(chan Job, size),
-		DB:   db,
+		Id:     id,
+		Jobs:   make(chan Job, size),
+		DB:     db,
+		Config: cfg,
+		Logger: log,
 	}
 }
 
-func (j *JobQueue) Enqueue(source string, industryType string, location string, numberOfRequest int, wg *sync.WaitGroup) {
+func (j *JobQueue) Enqueue(jobID uuid.UUID, source string, industryType string, location string, numberOfRequest int, leadsCollected int) {
 	j.Jobs <- Job{
+		JobID:           jobID,
 		Source:          source,
 		IndustryType:    industryType,
 		Location:        location,
 		NumberOfRequest: numberOfRequest,
-		WG:              wg,
+		LeadsCollected:  leadsCollected,
 	}
 }
 
 //
 
-func worker(id int, jobs <-chan Job, db *gorm.DB) {
+func worker(id int, jobs <-chan Job, db *gorm.DB, cfg *config.Config, log logger.Logger) {
 	for {
 		job, ok := <-jobs
 		if !ok {
-			fmt.Println("Returning from go routine because channel is closed")
+			log.Info("Returning from go routine because channel is closed")
 			return
 		}
 
+		var err error
 		switch job.Source {
 		case "google_maps":
-			scrapper.ScrapGoogleMaps(db, job.IndustryType, job.Location, job.NumberOfRequest)
+			err = scrapper.ScrapGoogleMaps(db, cfg, log, job.JobID, job.IndustryType, job.Location, job.NumberOfRequest)
 		case "linked_in":
-			scrapper.ScrapLinkedIn(db, job.IndustryType, job.Location, job.NumberOfRequest)
+			err = scrapper.ScrapLinkedIn(db, cfg, log, job.JobID, job.IndustryType, job.Location, job.NumberOfRequest)
 		case "facebook":
-			scrapper.ScrapFacebook(db, job.IndustryType, job.Location, job.NumberOfRequest)
+			err = scrapper.ScrapFacebook(db, cfg, log, job.JobID, job.IndustryType, job.Location, job.NumberOfRequest)
 		case "instagram":
-			scrapper.ScrapInstagram(db, job.IndustryType, job.Location, job.NumberOfRequest)
+			err = scrapper.ScrapInstagram(db, cfg, log, job.JobID, job.IndustryType, job.Location, job.NumberOfRequest)
 		default:
-			fmt.Printf("Worker %d processing source %s, industry %s, location %s\n", id, job.Source, job.IndustryType, job.Location)
+			log.Info(fmt.Sprintf("Worker %d processing source %s, industry %s, location %s", id, job.Source, job.IndustryType, job.Location))
 		}
 
-		if job.WG != nil {
-			job.WG.Done()
+		if err != nil {
+			log.Error(fmt.Sprintf("Error processing job: %v", err))
+		} else {
+			db.Model(&model.LeadScrapingJob{}).Where("id = ?", job.JobID).Update("status", "COMPLETED")
 		}
+
 	}
 }
 
 func (j *JobQueue) StartWorkers(numberOfWorkers int) {
 	for i := 1; i <= numberOfWorkers; i++ {
-		go worker(i, j.Jobs, j.DB)
+		go worker(i, j.Jobs, j.DB, j.Config, j.Logger)
 	}
 }
 
-func InitQueue(db *gorm.DB) []JobQueue {
+func InitQueue(db *gorm.DB, cfg *config.Config, log logger.Logger) []JobQueue {
 	var QueueList []JobQueue
 	// Fixed sources for initialization
 	sources := []string{"google_maps", "linked_in", "facebook", "instagram"}
 
 	for i, source := range sources {
-		q := NewJobQueue(10, int64(i+1), db)
+		sz := cfg.LengthOfJobQueue
+		if sz <= 0 {
+			sz = 1000
+		}
+		workers := cfg.NumberOfWorkersPerRequest
+		if workers <= 0 {
+			workers = 10
+		}
+
+		q := NewJobQueue(sz, int64(i+1), db, cfg, log)
 		q.Source = source
-		q.StartWorkers(50) // Start 50 workers for this queue
+		q.StartWorkers(int(workers)) // Start workers for this queue
 		QueueList = append(QueueList, *q)
 	}
 

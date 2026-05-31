@@ -3,6 +3,7 @@ package config
 import (
 	"log"
 	"os"
+	"time"
 
 	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/viper"
@@ -24,6 +25,10 @@ type Config struct {
 	NumberOfWorkersPerRequest int64 `mapstructure:"NUMBER_OF_WORKERS_PER_REQUEST"`
 
 	LengthOfJobQueue int64 `mapstructure:"LENGTH_OF_JOB_QUEUE"`
+
+	CheckpointNumberOfLeads int64 `mapstructure:"CHECKPOINT_NUMBER_OF_LEADS"`
+
+	OutboxPollingInterval time.Duration `mapstructure:"OUTBOX_POLLING_INTERVAL"`
 }
 
 func LoadConfigEnv() (*Config, error) {

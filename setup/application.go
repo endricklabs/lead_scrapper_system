@@ -37,7 +37,10 @@ func NewApplication() *Application {
 	}
 
 	// Queue and Worker Initializer
-	queueList := queue.InitQueue(db)
+	queueList := queue.InitQueue(db, cfg, logger)
+
+	// Start the DB Outbox background poller
+	queue.StartOutboxPoller(db, queueList, cfg, logger)
 
 	return &Application{
 		DB:        db,
