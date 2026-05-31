@@ -2,8 +2,10 @@ package lead_service
 
 import (
 	lead_dto "lead_scrapper_be/internal/dto/lead"
+	"lead_scrapper_be/internal/model"
+	"lead_scrapper_be/pkg/queue"
+	"lead_scrapper_be/pkg/utils/api"
 	"lead_scrapper_be/setup"
-	"sync"
 
 	"github.com/labstack/echo/v4"
 )
@@ -20,20 +22,22 @@ func NewLeadService(app *setup.Application) LeadService {
 
 func (s leadService) Scrap(c echo.Context, leadScrapRequest lead_dto.LeadScrapRequest) error {
 
-	var wg sync.WaitGroup
-
-	// enqueue the jobs
 	for _, reqSource := range leadScrapRequest.Source {
-		for i := range s.app.QueueList {
-			if s.app.QueueList[i].Source == string(reqSource.Source) {
-				wg.Add(1)
-				s.app.QueueList[i].Enqueue(string(reqSource.Source), leadScrapRequest.IndustryType, leadScrapRequest.Location, int(reqSource.NumberOfRequest), &wg)
-			}
+
+		// Not found, insert new
+		job := model.LeadScrapingJob{
+			Source:          string(reqSource.Source),
+			IndustryType:    leadScrapRequest.IndustryType,
+			Location:        leadScrapRequest.Location,
+			TargetRequested: int(reqSource.NumberOfRequest),
+			Status:          "PENDING",
 		}
+		s.app.DB.Create(&job)
+
 	}
 
-	// block until all scraping jobs complete
-	wg.Wait()
+	// Trigger immediate background polling dynamically
+	go queue.PollPendingJobs(s.app.DB, s.app.QueueList, s.app.Config, s.app.Logger)
 
-	return nil
+	return api.SuccessfulResponse(c, "Lead Scrapping has been started.")
 }

@@ -3,10 +3,13 @@ package scrapper
 import (
 	"context"
 	"fmt"
-	"log"
+	"lead_scrapper_be/internal/config"
+	"lead_scrapper_be/internal/model"
+	"lead_scrapper_be/pkg/logger"
 	"time"
 
 	"github.com/chromedp/chromedp"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
@@ -15,7 +18,71 @@ type Lead struct {
 	URL  string
 }
 
-func ScrapeGoogleMapsLeads(ctx context.Context, industry, location string, target int) ([]Lead, error) {
+// GENERIC LEAD SAVE FUNCTION THAT CAN BE USED BY ALL THE WORKERS FROM ALL THE SOURCES (SHOULD INVOLVE DEDEPLICATION)
+func saveLead(db *gorm.DB, log logger.Logger, jobID uuid.UUID, tempLeads []Lead, industry, location, contextLog string) []Lead {
+	if len(tempLeads) == 0 || jobID == uuid.Nil || db == nil {
+		return tempLeads
+	}
+
+	batchSize := len(tempLeads)
+	err := db.Transaction(func(tx *gorm.DB) error {
+		// Update job status: accumulate leads_collected
+		if err := tx.Exec("UPDATE lead_scraping_jobs SET leads_collected = leads_collected + ? WHERE id = ?", batchSize, jobID).Error; err != nil {
+			return err
+		}
+
+		// Prepare batch for insertion
+		var batchLeads []model.Lead
+		for _, tl := range tempLeads {
+			batchLeads = append(batchLeads, model.Lead{
+				Name:         tl.Name,
+				IndustryType: industry,
+				Location:     location,
+				Source:       "google_maps",
+				Website:      tl.URL,
+				JobID:        jobID,
+			})
+		}
+
+		// Batch insert new leads
+		if len(batchLeads) > 0 {
+			if err := tx.Create(&batchLeads).Error; err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		log.Error(fmt.Sprintf("[%s] Transaction failed for job %s: %v", contextLog, jobID, err))
+	} else {
+		log.Info(fmt.Sprintf("[%s] Updated job %s and inserted %d leads", contextLog, jobID, batchSize))
+	}
+
+	return []Lead{} // Clear after saving
+}
+
+// ======================================================================================================
+// ======================================================================================================
+// ======================================================================================================
+
+func ScrapeGoogleMapsLeads(ctx context.Context, db *gorm.DB, cfg *config.Config, log logger.Logger, jobID uuid.UUID, industry, location string, target int) error {
+
+	var initialLeadsCollected int
+	if db != nil && jobID != uuid.Nil {
+		var job model.LeadScrapingJob
+		if err := db.Select("leads_collected").First(&job, "id = ?", jobID).Error; err == nil {
+			initialLeadsCollected = job.LeadsCollected
+		} else {
+			log.Error(fmt.Sprintf("Could not fetch job %s for initial leads count: %v", jobID, err))
+		}
+	}
+
+	if initialLeadsCollected >= target {
+		log.Info(fmt.Sprintf("Job %s already reached target (%d/%d leads). Skipping scraping.", jobID, initialLeadsCollected, target))
+		return nil
+	}
 
 	query := industry + " in " + location
 	results := []Lead{}
@@ -32,14 +99,13 @@ func ScrapeGoogleMapsLeads(ctx context.Context, industry, location string, targe
 
 		chromedp.Sleep(10*time.Second),
 	)
-
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	seen := map[string]bool{}
+	tempLeads := []Lead{}
 
-	for len(results) < target {
+	for initialLeadsCollected+len(results) < target {
 
 		var batch []Lead
 
@@ -72,34 +138,34 @@ func ScrapeGoogleMapsLeads(ctx context.Context, industry, location string, targe
 		)
 
 		if err != nil {
-			return nil, err
+			tempLeads = saveLead(db, log, jobID, tempLeads, industry, location, "Error Save")
+			return err
 		}
 
-		// dedupe
 		for _, b := range batch {
 
-			if len(results) >= target {
+			if initialLeadsCollected+len(results) >= target {
 				break
 			}
 
-			if b.Name == "" || seen[b.URL] {
-				continue
-			}
-
-			seen[b.URL] = true
-
 			results = append(results, b)
+			tempLeads = append(tempLeads, b)
 
-			fmt.Println("Collected:", len(results))
+			log.Info(fmt.Sprintf("[GoogleMaps] Session Collected: %d (Total job count: %d/%d)", len(results), initialLeadsCollected+len(results), target))
+
+			// Check if we hit the checkpoint size EXACTLY, or if it's the last lead
+			if int64(len(tempLeads)) == cfg.CheckpointNumberOfLeads || initialLeadsCollected+len(results) >= target {
+				tempLeads = saveLead(db, log, jobID, tempLeads, industry, location, "Checkpoint")
+			}
 		}
 	}
 
-	return results, nil
+	return nil
 }
 
-func ScrapGoogleMaps(db *gorm.DB, industryType, location string, numberOfRequest int) {
+func ScrapGoogleMaps(db *gorm.DB, cfg *config.Config, log logger.Logger, jobID uuid.UUID, industryType, location string, numberOfRequest int) error {
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", false),
+		chromedp.Flag("headless", true),
 		chromedp.Flag("no-sandbox", true),
 	)
 
@@ -112,132 +178,29 @@ func ScrapGoogleMaps(db *gorm.DB, industryType, location string, numberOfRequest
 	ctx, cancel = context.WithTimeout(ctx, 180*time.Second)
 	defer cancel()
 
-	leads, err := ScrapeGoogleMapsLeads(ctx, industryType, location, numberOfRequest)
+	err := ScrapeGoogleMapsLeads(ctx, db, cfg, log, jobID, industryType, location, numberOfRequest)
 	if err != nil {
-		log.Fatal(err)
+		log.Error(fmt.Sprintf("[GoogleMaps] Scraping failed: %v", err))
+		return err
 	}
 
-	fmt.Println("\n📍 FINAL LEADS:\n")
-
-	for i, l := range leads {
-		fmt.Printf("%d.\nName: %s\nMaps URL: %s\n\n",
-			i+1,
-			l.Name,
-			l.URL,
-		)
-	}
-
+	return nil
 }
 
-func ScrapeLinkedInLeads(ctx context.Context, industry, location string, target int) ([]Lead, error) {
-	// LinkedIn public company search: no login required for basic results
-	searchURL := fmt.Sprintf(
-		"https://www.linkedin.com/search/results/companies/?keywords=%s%%20%s&origin=GLOBAL_SEARCH_HEADER",
-		industry, location,
-	)
-
-	results := []Lead{}
-	seen := map[string]bool{}
-
-	err := chromedp.Run(ctx,
-		chromedp.Navigate(searchURL),
-		chromedp.Sleep(6*time.Second),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	for len(results) < target {
-		var batch []Lead
-
-		err := chromedp.Run(ctx,
-			// wait for result cards
-			chromedp.WaitVisible(`.search-results-container`, chromedp.ByQuery),
-
-			// extract company name + URL from each result card
-			chromedp.Evaluate(`
-			(() => {
-				const cards = document.querySelectorAll('.entity-result__item');
-				return Array.from(cards).map(card => {
-					const anchor = card.querySelector('.app-aware-link[href*="/company/"]');
-					const nameEl = card.querySelector('.entity-result__title-text');
-					if (!anchor || !nameEl) return null;
-					return {
-						Name: nameEl.innerText.trim(),
-						URL:  anchor.href.split('?')[0],
-					};
-				}).filter(Boolean);
-			})()
-			`, &batch),
-
-			// scroll down for more results
-			chromedp.Evaluate(`window.scrollBy(0, 1500)`, nil),
-			chromedp.Sleep(2*time.Second),
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		prevLen := len(results)
-		for _, b := range batch {
-			if len(results) >= target {
-				break
-			}
-			if b.Name == "" || seen[b.URL] {
-				continue
-			}
-			seen[b.URL] = true
-			results = append(results, b)
-			fmt.Println("Collected:", len(results))
-		}
-
-		// no new results after a scroll → we've hit the end of the page
-		if len(results) == prevLen {
-			fmt.Println("[LinkedIn] No new results after scroll, stopping early.")
-			break
-		}
-	}
-
-	return results, nil
+func ScrapLinkedIn(db *gorm.DB, cfg *config.Config, log logger.Logger, jobID uuid.UUID, industryType, location string, numberOfRequest int) error {
+	fmt.Printf("[LinkedIn Scraper] Scraping leads for %s in %s...\n", industryType, location)
+	// Placeholder
+	return nil
 }
 
-func ScrapLinkedIn(db *gorm.DB, industryType, location string, numberOfRequest int) {
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", false),
-		chromedp.Flag("no-sandbox", true),
-	)
-
-	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
-	defer cancel()
-
-	ctx, cancel := chromedp.NewContext(allocCtx)
-	defer cancel()
-
-	ctx, cancel = context.WithTimeout(ctx, 180*time.Second)
-	defer cancel()
-
-	leads, err := ScrapeLinkedInLeads(ctx, industryType, location, numberOfRequest)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Println("\n🔗 FINAL LEADS (LinkedIn):\n")
-
-	for i, l := range leads {
-		fmt.Printf("%d.\nName: %s\nLinkedIn URL: %s\n\n",
-			i+1,
-			l.Name,
-			l.URL,
-		)
-	}
-}
-
-func ScrapFacebook(db *gorm.DB, industryType, location string, numberOfRequest int) {
+func ScrapFacebook(db *gorm.DB, cfg *config.Config, log logger.Logger, jobID uuid.UUID, industryType, location string, numberOfRequest int) error {
 	fmt.Printf("[Facebook Scraper] Scraping leads for %s in %s...\n", industryType, location)
 	// Placeholder
+	return nil
 }
 
-func ScrapInstagram(db *gorm.DB, industryType, location string, numberOfRequest int) {
+func ScrapInstagram(db *gorm.DB, cfg *config.Config, log logger.Logger, jobID uuid.UUID, industryType, location string, numberOfRequest int) error {
 	fmt.Printf("[Instagram Scraper] Scraping leads for %s in %s...\n", industryType, location)
 	// Placeholder
+	return nil
 }
