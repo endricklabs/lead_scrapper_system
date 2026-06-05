@@ -13,16 +13,16 @@ import (
 func PollPendingJobs(db *gorm.DB, queues []JobQueue, cfg *config.Config, log logger.Logger) {
 	var pendingJobs []model.LeadScrapingJob
 
-	// Find PENDING jobs
+	// Find Pending jobs
 	if err := db.Where("status = ?", "PENDING").Find(&pendingJobs).Error; err != nil {
 		log.Error(fmt.Sprintf("Error fetching pending jobs: %v", err))
 		return
 	}
-
 	if len(pendingJobs) > 0 {
 		log.Info(fmt.Sprintf("[Outbox Poller] Found %d pending jobs in database. Enqueuing them now...", len(pendingJobs)))
 	}
 
+	// Traverse through the pending jobs and enqueue each of them based on the source queue
 	for _, job := range pendingJobs {
 
 		// Find matching queue

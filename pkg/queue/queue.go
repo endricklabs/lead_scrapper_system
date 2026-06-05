@@ -29,13 +29,14 @@ type JobQueue struct {
 	Logger logger.Logger
 }
 
-func NewJobQueue(size int64, id int64, db *gorm.DB, cfg *config.Config, log logger.Logger) *JobQueue {
+func NewJobQueue(size int64, id int64, db *gorm.DB, cfg *config.Config, log logger.Logger, source string) *JobQueue {
 	return &JobQueue{
 		Id:     id,
 		Jobs:   make(chan Job, size),
 		DB:     db,
 		Config: cfg,
 		Logger: log,
+		Source: source,
 	}
 }
 
@@ -104,9 +105,13 @@ func InitQueue(db *gorm.DB, cfg *config.Config, log logger.Logger) []JobQueue {
 			workers = 10
 		}
 
-		q := NewJobQueue(sz, int64(i+1), db, cfg, log)
-		q.Source = source
-		q.StartWorkers(int(workers)) // Start workers for this queue
+		// Create queue for the source
+		q := NewJobQueue(sz, int64(i+1), db, cfg, log, source)
+
+		// Start workers for this queue
+		q.StartWorkers(int(workers))
+
+		// Append the queue to the list
 		QueueList = append(QueueList, *q)
 	}
 
