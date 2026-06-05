@@ -1,0 +1,16 @@
+[
+  {
+    "Name": "Basic",
+    "Slug": "basic",
+    "Price": 0,
+    "Description": "This is Basic Subscription Package. It is free.",
+    "MaxLeadsPerMonth": 50
+  },
+  {
+    "Name": "Premium",
+    "Slug": "premium",
+    "Price": 5,
+    "Description": "This is Premium Subscription Package. It is paid.",
+    "MaxLeadsPerMonth": 500
+  }
+]

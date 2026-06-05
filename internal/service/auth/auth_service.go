@@ -1,6 +1,8 @@
 package auth_service
 
 import (
+	"time"
+
 	"lead_scrapper_be/internal/dto/auth"
 	"lead_scrapper_be/internal/model"
 	"lead_scrapper_be/pkg/utils"
@@ -9,6 +11,7 @@ import (
 	"lead_scrapper_be/setup"
 
 	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
 )
 
 type authService struct {
@@ -34,14 +37,42 @@ func (s authService) Signup(signupRequest auth_dto.SignupRequest) error {
 		Password: hashedPassword,
 	}
 
-	if err := s.app.DB.Create(&databaseInput).Error; err != nil {
-		s.app.Logger.Error("Error while creating user in database", "error", err)
+	err = s.app.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&databaseInput).Error; err != nil {
+			s.app.Logger.Error("Error while creating user in database", "error", err)
+			return err
+		}
+
+		var basicPackage model.SubscriptionPackage
+		if err := tx.Where("slug = ?", "basic").First(&basicPackage).Error; err != nil {
+			s.app.Logger.Error("Error while fetching basic subscription package", "error", err)
+			return err
+		}
+
+		userSubscription := model.UserSubscription{
+			UserID:                databaseInput.ID,
+			SubscriptionPackageID: basicPackage.ID,
+			Status:                model.UserSubscriptionStatusActive,
+			StartDate:             time.Now(),
+			EndDate:               time.Now().AddDate(0, 1, 0), // Grant 1 month for free
+		}
+
+		if err := tx.Create(&userSubscription).Error; err != nil {
+			s.app.Logger.Error("Error while creating user subscription", "error", err)
+			return err
+		}
+
+		return nil
+	})
+
+	if err != nil {
 		return err
 	}
 
-	s.app.Logger.Info("User created successfully", "email", signupRequest.Email)
+	s.app.Logger.Info("User created successfully with basic subscription", "email", signupRequest.Email)
 	return nil
 }
+
 
 func (s authService) Login(c echo.Context, loginRequest auth_dto.LoginRequest) (*auth_dto.LoginResponse, error) {
 
