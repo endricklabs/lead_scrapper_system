@@ -21,6 +21,6 @@ type UserSubscription struct {
 	SubscriptionPackageID uuid.UUID              `gorm:"type:uuid;not null"`
 	SubscriptionPackage   SubscriptionPackage    `gorm:"foreignKey:SubscriptionPackageID"`
 	Status                UserSubscriptionStatus `gorm:"not null"`
-	StartDate             time.Time              `gorm:"not null"`
-	EndDate               time.Time              `gorm:"not null"`
+	StartDate             *time.Time             `json:"startDate,omitempty"`
+	EndDate               *time.Time             `json:"endDate,omitempty"`
 }

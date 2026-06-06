@@ -3,7 +3,7 @@ package auth_service
 import (
 	"time"
 
-	"lead_scrapper_be/internal/dto/auth"
+	auth_dto "lead_scrapper_be/internal/dto/auth"
 	"lead_scrapper_be/internal/model"
 	"lead_scrapper_be/pkg/utils"
 	"lead_scrapper_be/pkg/utils/api"
@@ -49,12 +49,13 @@ func (s authService) Signup(signupRequest auth_dto.SignupRequest) error {
 			return err
 		}
 
+		start := time.Now()
 		userSubscription := model.UserSubscription{
 			UserID:                databaseInput.ID,
 			SubscriptionPackageID: basicPackage.ID,
 			Status:                model.UserSubscriptionStatusActive,
-			StartDate:             time.Now(),
-			EndDate:               time.Now().AddDate(0, 1, 0), // Grant 1 month for free
+			StartDate:             &start,
+			EndDate:               nil,
 		}
 
 		if err := tx.Create(&userSubscription).Error; err != nil {
@@ -72,7 +73,6 @@ func (s authService) Signup(signupRequest auth_dto.SignupRequest) error {
 	s.app.Logger.Info("User created successfully with basic subscription", "email", signupRequest.Email)
 	return nil
 }
-
 
 func (s authService) Login(c echo.Context, loginRequest auth_dto.LoginRequest) (*auth_dto.LoginResponse, error) {
 
