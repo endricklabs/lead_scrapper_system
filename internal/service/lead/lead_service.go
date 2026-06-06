@@ -20,7 +20,7 @@ func NewLeadService(app *setup.Application) LeadService {
 	}
 }
 
-func (s leadService) Scrap(c echo.Context, leadScrapRequest lead_dto.LeadScrapRequest) error {
+func (s leadService) Scrap(c echo.Context, leadScrapRequest lead_dto.LeadScrapRequest, user model.User) error {
 
 	for _, reqSource := range leadScrapRequest.Source {
 
@@ -31,6 +31,7 @@ func (s leadService) Scrap(c echo.Context, leadScrapRequest lead_dto.LeadScrapRe
 			Location:        leadScrapRequest.Location,
 			TargetRequested: int(reqSource.NumberOfRequest),
 			Status:          "PENDING",
+			UserID:          user.ID,
 		}
 		s.app.DB.Create(&job)
 

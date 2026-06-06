@@ -2,6 +2,7 @@ package lead
 
 import (
 	lead_dto "lead_scrapper_be/internal/dto/lead"
+	"lead_scrapper_be/internal/model"
 	lead_service "lead_scrapper_be/internal/service/lead"
 
 	"lead_scrapper_be/pkg/utils/api"
@@ -24,6 +25,7 @@ func NewLeadHandler(app *setup.Application) *LeadHandler {
 // @Summary Scrap leads from multiple sources
 // @Description Start a lead scrapping job for the specified industry and location across multiple sources (Google Maps, LinkedIn, etc.)
 // @Tags Lead
+// @Security BearerAuth
 // @Accept json
 // @Produce json
 // @Param request body lead_dto.LeadScrapRequest true "Scrap Request"
@@ -37,12 +39,14 @@ func (h *LeadHandler) Scrap(c echo.Context) error {
 		return api.BadRequest(c, err.Error())
 	}
 
+	user := c.Get("user").(*model.User)
+
 	// You might want to add validation here
 	if err := c.Validate(&leadScrapRequest); err != nil {
 		return api.BadRequest(c, err.Error())
 	}
 
-	if err := h.leadService.Scrap(c, leadScrapRequest); err != nil {
+	if err := h.leadService.Scrap(c, leadScrapRequest, *user); err != nil {
 		return api.InternalServerError(c, err.Error())
 	}
 

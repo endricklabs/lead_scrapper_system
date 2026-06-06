@@ -5,6 +5,7 @@ import (
 
 	authHandler "lead_scrapper_be/internal/handler/auth"
 	leadHandler "lead_scrapper_be/internal/handler/lead"
+	jwt_middleware "lead_scrapper_be/internal/middleware/jwt"
 
 	"github.com/labstack/echo/v4"
 	echoSwagger "github.com/swaggo/echo-swagger"
@@ -19,7 +20,7 @@ func SetupRoutes(e *echo.Echo, app *setup.Application) {
 	authRoutes(authApi, app)
 
 	// Lead Scrapper Route
-	leadApi := api.Group("/lead")
+	leadApi := api.Group("/lead", jwt_middleware.JWTMiddleware(app))
 	leadRoutes(leadApi, app)
 
 	// Swagger Route

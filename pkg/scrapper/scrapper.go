@@ -11,6 +11,7 @@ import (
 	"github.com/chromedp/chromedp"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type Lead struct {
@@ -19,13 +20,73 @@ type Lead struct {
 }
 
 // GENERIC LEAD SAVE FUNCTION THAT CAN BE USED BY ALL THE WORKERS FROM ALL THE SOURCES (SHOULD INVOLVE DEDEPLICATION)
-func saveLead(db *gorm.DB, log logger.Logger, jobID uuid.UUID, tempLeads []Lead, industry, location, contextLog string) []Lead {
+// saveLead saves up to the allowed number of leads for the job.
+// It returns the remaining tempLeads, a boolean flag `stop` indicating
+// whether scraping should stop (quota reached), and an error if the
+// database transaction failed.
+func saveLead(db *gorm.DB, log logger.Logger, jobID uuid.UUID, tempLeads []Lead, industry, location, contextLog string) ([]Lead, bool, error) {
 	if len(tempLeads) == 0 || jobID == uuid.Nil || db == nil {
-		return tempLeads
+		return tempLeads, false, nil
 	}
 
 	batchSize := len(tempLeads)
+	var limitReachedError error
+	stop := false
+
 	err := db.Transaction(func(tx *gorm.DB) error {
+		// 1. Fetch UserID for the Job
+		var job model.LeadScrapingJob
+		if err := tx.Select("user_id").First(&job, "id = ?", jobID).Error; err != nil {
+			return err
+		}
+
+		// 2. Lock the active UserSubscription for this user to serialize concurrent saves
+		var activeSub model.UserSubscription
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Preload("SubscriptionPackage").
+			Where("user_id = ? AND status = ?", job.UserID, model.UserSubscriptionStatusActive).
+			First(&activeSub).Error; err != nil {
+			return fmt.Errorf("active subscription not found: %w", err)
+		}
+
+		// 3. Limit Enforcement
+		limitConfig := activeSub.SubscriptionPackage.MaxLeadsPerMonth
+		if limitConfig > 0 {
+			var currentMonthScraped int64
+			if err := tx.Table("leads").
+				Joins("JOIN lead_scraping_jobs ON leads.job_id = lead_scraping_jobs.id").
+				Where("lead_scraping_jobs.user_id = ? AND leads.created_at >= ? AND leads.created_at <= ?",
+					job.UserID, activeSub.StartDate, activeSub.EndDate).
+				Count(&currentMonthScraped).Error; err != nil {
+				return err
+			}
+
+			if int(currentMonthScraped)+batchSize > limitConfig {
+				allowed := limitConfig - int(currentMonthScraped)
+				if allowed <= 0 {
+					// No capacity left. Mark job as completed and stop further scraping.
+					limitReachedError = fmt.Errorf("monthly lead limit reached")
+					batchSize = 0
+					tempLeads = nil
+					stop = true
+
+					if err := tx.Model(&model.LeadScrapingJob{}).Where("id = ?", jobID).Update("status", model.JobStatusCompleted).Error; err != nil {
+						return fmt.Errorf("failed to update job status to completed: %w", err)
+					}
+				} else {
+					// Partial capacity available: limit to `allowed` and after saving mark completed.
+					limitReachedError = fmt.Errorf("monthly lead limit reached")
+					batchSize = allowed
+					tempLeads = tempLeads[:allowed]
+					// we'll mark job completed after inserting the allowed leads
+				}
+			}
+		}
+
+		if batchSize == 0 {
+			return nil
+		}
+
 		// Update job status: accumulate leads_collected
 		if err := tx.Exec("UPDATE lead_scraping_jobs SET leads_collected = leads_collected + ? WHERE id = ?", batchSize, jobID).Error; err != nil {
 			return err
@@ -51,16 +112,34 @@ func saveLead(db *gorm.DB, log logger.Logger, jobID uuid.UUID, tempLeads []Lead,
 			}
 		}
 
+		// If we previously detected a partial capacity (allowed < requested), mark job completed
+		if limitReachedError != nil && batchSize > 0 {
+			if err := tx.Model(&model.LeadScrapingJob{}).Where("id = ?", jobID).Update("status", model.JobStatusCompleted).Error; err != nil {
+				return fmt.Errorf("failed to update job status to completed: %w", err)
+			}
+			stop = true
+		}
+
 		return nil
 	})
 
 	if err != nil {
 		log.Error(fmt.Sprintf("[%s] Transaction failed for job %s: %v", contextLog, jobID, err))
-	} else {
+		return tempLeads, false, err
+	} else if batchSize > 0 {
 		log.Info(fmt.Sprintf("[%s] Updated job %s and inserted %d leads", contextLog, jobID, batchSize))
 	}
 
-	return []Lead{} // Clear after saving
+	if limitReachedError != nil {
+		log.Error(fmt.Sprintf("[%s] Limit reached for job %s: %v", contextLog, jobID, limitReachedError))
+		// If limit reached and we already marked job completed, signal stop without error.
+		if stop {
+			return []Lead{}, true, nil
+		}
+		return []Lead{}, true, nil
+	}
+
+	return []Lead{}, false, nil // Clear after saving; don't stop
 }
 
 // ======================================================================================================
@@ -138,7 +217,12 @@ func ScrapeGoogleMapsLeads(ctx context.Context, db *gorm.DB, cfg *config.Config,
 		)
 
 		if err != nil {
-			tempLeads = saveLead(db, log, jobID, tempLeads, industry, location, "Error Save")
+			var stop bool
+			tempLeads, stop, _ = saveLead(db, log, jobID, tempLeads, industry, location, "Error Save")
+			if stop {
+				// Quota reached and job marked completed; stop gracefully
+				return nil
+			}
 			return err
 		}
 
@@ -155,7 +239,17 @@ func ScrapeGoogleMapsLeads(ctx context.Context, db *gorm.DB, cfg *config.Config,
 
 			// Check if we hit the checkpoint size EXACTLY, or if it's the last lead
 			if int64(len(tempLeads)) == cfg.CheckpointNumberOfLeads || initialLeadsCollected+len(results) >= target {
-				tempLeads = saveLead(db, log, jobID, tempLeads, industry, location, "Checkpoint")
+				var saveErr error
+				var stop bool
+				tempLeads, stop, saveErr = saveLead(db, log, jobID, tempLeads, industry, location, "Checkpoint")
+				if saveErr != nil {
+					log.Info(fmt.Sprintf("[GoogleMaps] Stopping early due to save issue or limit: %v", saveErr))
+					return saveErr
+				}
+				if stop {
+					log.Info(fmt.Sprintf("[GoogleMaps] Stopping early due to quota reached"))
+					return nil
+				}
 			}
 		}
 	}

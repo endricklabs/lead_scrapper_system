@@ -175,6 +175,8 @@ paths:
           description: Internal Server Error
           schema:
             $ref: '#/definitions/api_dto.ApiResponse'
+      security:
+      - BearerAuth: []
       summary: Scrap leads from multiple sources
       tags:
       - Lead

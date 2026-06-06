@@ -130,6 +130,11 @@ const docTemplate = `{
         },
         "/lead/scrap": {
             "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
                 "description": "Start a lead scrapping job for the specified industry and location across multiple sources (Google Maps, LinkedIn, etc.)",
                 "consumes": [
                     "application/json"

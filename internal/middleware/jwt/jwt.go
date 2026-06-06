@@ -63,6 +63,7 @@ func JWTMiddleware(app *setup.Application) echo.MiddlewareFunc {
 			}
 
 			// 6. Store user info in context (for use in handlers)
+			c.Set("user", &user)
 			c.Set("user_id", claims["sub"])
 			c.Set("email", claims["email"])
 
