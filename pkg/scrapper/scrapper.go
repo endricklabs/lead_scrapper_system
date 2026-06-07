@@ -19,7 +19,88 @@ type Lead struct {
 	URL  string
 }
 
-// GENERIC LEAD SAVE FUNCTION THAT CAN BE USED BY ALL THE WORKERS FROM ALL THE SOURCES (SHOULD INVOLVE DEDEPLICATION)
+// deduplicateLeads removes duplicate leads from the batch based on existing records in the database.
+// It checks for duplicates using website URL and name+location combination.
+// Only truly new leads are returned.
+func deduplicateLeads(tx *gorm.DB, log logger.Logger, tempLeads []Lead, industry, location, contextLog string) ([]Lead, error) {
+	if len(tempLeads) == 0 {
+		return tempLeads, nil
+	}
+
+	// Extract websites and names to check for existing leads
+	var websites []string
+	var names []string
+	for _, lead := range tempLeads {
+		if lead.URL != "" {
+			websites = append(websites, lead.URL)
+		}
+		if lead.Name != "" {
+			names = append(names, lead.Name)
+		}
+	}
+
+	// Query for existing leads with matching websites or name+location+industry combinations
+	var existingLeads []model.Lead
+	query := tx.Where("1 = 0")
+
+	if len(websites) > 0 {
+		query = query.Or(tx.Where("website IN ?", websites))
+	}
+
+	if len(names) > 0 {
+		query = query.Or(tx.Where("name IN ? AND industry_type = ? AND location = ?", names, industry, location))
+	}
+
+	if err := query.Find(&existingLeads).Error; err != nil {
+		log.Error(fmt.Sprintf("[%s] Error querying existing leads for deduplication: %v", contextLog, err))
+		return tempLeads, err
+	}
+
+	// Build maps of existing leads for quick lookup
+	existingWebsites := make(map[string]bool)
+	existingNameLocationIndustry := make(map[string]bool)
+
+	for _, existing := range existingLeads {
+		if existing.Website != "" {
+			existingWebsites[existing.Website] = true
+		}
+		if existing.Name != "" {
+			key := fmt.Sprintf("%s|%s|%s", existing.Name, existing.IndustryType, existing.Location)
+			existingNameLocationIndustry[key] = true
+		}
+	}
+
+	// Filter out duplicates: only keep leads that don't already exist
+	var uniqueLeads []Lead
+	for _, lead := range tempLeads {
+		isDuplicate := false
+
+		// Check if website already exists
+		if lead.URL != "" && existingWebsites[lead.URL] {
+			isDuplicate = true
+		}
+
+		// Check if name+location+industry combination already exists
+		if !isDuplicate && lead.Name != "" {
+			key := fmt.Sprintf("%s|%s|%s", lead.Name, industry, location)
+			if existingNameLocationIndustry[key] {
+				isDuplicate = true
+			}
+		}
+
+		if !isDuplicate {
+			uniqueLeads = append(uniqueLeads, lead)
+		}
+	}
+
+	if len(uniqueLeads) < len(tempLeads) {
+		log.Info(fmt.Sprintf("[%s] Deduplicated leads: filtered out %d duplicates, keeping %d unique leads", contextLog, len(tempLeads)-len(uniqueLeads), len(uniqueLeads)))
+	}
+
+	return uniqueLeads, nil
+}
+
+// GENERIC LEAD SAVE FUNCTION THAT CAN BE USED BY ALL THE WORKERS FROM ALL THE SOURCES (INVOLVES DEDUPLICATION)
 // saveLead saves up to the allowed number of leads for the job.
 // It returns the remaining tempLeads, a boolean flag `stop` indicating
 // whether scraping should stop (quota reached), and an error if the
@@ -32,6 +113,7 @@ func saveLead(db *gorm.DB, log logger.Logger, jobID uuid.UUID, tempLeads []Lead,
 	batchSize := len(tempLeads)
 	var limitReachedError error
 	stop := false
+	var deduplicatedCount int
 
 	err := db.Transaction(func(tx *gorm.DB) error {
 		// 1. Fetch UserID for the Job
@@ -87,14 +169,27 @@ func saveLead(db *gorm.DB, log logger.Logger, jobID uuid.UUID, tempLeads []Lead,
 			return nil
 		}
 
-		// Update job status: accumulate leads_collected
-		if err := tx.Exec("UPDATE lead_scraping_jobs SET leads_collected = leads_collected + ? WHERE id = ?", batchSize, jobID).Error; err != nil {
+		// Deduplicate leads: filter out any that already exist in the database
+		deduplicatedLeads, err := deduplicateLeads(tx, log, tempLeads, industry, location, contextLog)
+		if err != nil {
+			return fmt.Errorf("deduplication failed: %w", err)
+		}
+
+		// Update deduplicatedCount to reflect the deduplicated count
+		deduplicatedCount = len(deduplicatedLeads)
+		if deduplicatedCount == 0 {
+			log.Info(fmt.Sprintf("[%s] All leads were duplicates, skipping insertion for job %s", contextLog, jobID))
+			return nil
+		}
+
+		// Update job status: accumulate leads_collected with deduplicated count
+		if err := tx.Exec("UPDATE lead_scraping_jobs SET leads_collected = leads_collected + ? WHERE id = ?", deduplicatedCount, jobID).Error; err != nil {
 			return err
 		}
 
-		// Prepare batch for insertion
+		// Prepare batch for insertion from deduplicated leads
 		var batchLeads []model.Lead
-		for _, tl := range tempLeads {
+		for _, tl := range deduplicatedLeads {
 			batchLeads = append(batchLeads, model.Lead{
 				Name:         tl.Name,
 				IndustryType: industry,
@@ -113,7 +208,7 @@ func saveLead(db *gorm.DB, log logger.Logger, jobID uuid.UUID, tempLeads []Lead,
 		}
 
 		// If we previously detected a partial capacity (allowed < requested), mark job completed
-		if limitReachedError != nil && batchSize > 0 {
+		if limitReachedError != nil && deduplicatedCount > 0 {
 			if err := tx.Model(&model.LeadScrapingJob{}).Where("id = ?", jobID).Update("status", model.JobStatusCompleted).Error; err != nil {
 				return fmt.Errorf("failed to update job status to completed: %w", err)
 			}
@@ -126,8 +221,8 @@ func saveLead(db *gorm.DB, log logger.Logger, jobID uuid.UUID, tempLeads []Lead,
 	if err != nil {
 		log.Error(fmt.Sprintf("[%s] Transaction failed for job %s: %v", contextLog, jobID, err))
 		return tempLeads, false, err
-	} else if batchSize > 0 {
-		log.Info(fmt.Sprintf("[%s] Updated job %s and inserted %d leads", contextLog, jobID, batchSize))
+	} else if deduplicatedCount > 0 {
+		log.Info(fmt.Sprintf("[%s] Updated job %s and inserted %d leads (deduplicated from %d)", contextLog, jobID, deduplicatedCount, batchSize))
 	}
 
 	if limitReachedError != nil {
