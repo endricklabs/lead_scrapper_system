@@ -19,77 +19,109 @@ type Lead struct {
 	URL  string
 }
 
-// deduplicateLeads removes duplicate leads from the batch based on existing records in the database.
-// It checks for duplicates using website URL and name+location combination.
-// Only truly new leads are returned.
+// deduplicateLeads removes duplicate leads from the batch based on:
+//  1. Existing records already in the database (website URL or name+industry+location).
+//  2. Duplicate entries within the batch itself (same lead scraped multiple times
+//     across outer-loop iterations before a checkpoint flush).
+//
+// Only truly new, unique leads are returned.
 func deduplicateLeads(tx *gorm.DB, log logger.Logger, tempLeads []Lead, industry, location, contextLog string) ([]Lead, error) {
 	if len(tempLeads) == 0 {
 		return tempLeads, nil
 	}
 
-	// Extract websites and names to check for existing leads
-	var websites []string
-	var names []string
+	// Collect unique websites and names from the batch to query the DB efficiently.
+	websiteSet := make(map[string]struct{})
+	nameSet := make(map[string]struct{})
 	for _, lead := range tempLeads {
 		if lead.URL != "" {
-			websites = append(websites, lead.URL)
+			websiteSet[lead.URL] = struct{}{}
 		}
 		if lead.Name != "" {
-			names = append(names, lead.Name)
+			nameSet[lead.Name] = struct{}{}
 		}
 	}
 
-	// Query for existing leads with matching websites or name+location+industry combinations
+	websites := make([]string, 0, len(websiteSet))
+	for w := range websiteSet {
+		websites = append(websites, w)
+	}
+	names := make([]string, 0, len(nameSet))
+	for n := range nameSet {
+		names = append(names, n)
+	}
+
+	// Query for existing leads with matching websites or name+industry+location combinations.
 	var existingLeads []model.Lead
-	query := tx.Where("1 = 0")
-
-	if len(websites) > 0 {
-		query = query.Or(tx.Where("website IN ?", websites))
+	if len(websites) > 0 || len(names) > 0 {
+		query := tx.Where("1 = 0")
+		if len(websites) > 0 {
+			query = query.Or("website IN ?", websites)
+		}
+		if len(names) > 0 {
+			query = query.Or("name IN ? AND industry_type = ? AND location = ?", names, industry, location)
+		}
+		if err := query.Find(&existingLeads).Error; err != nil {
+			log.Error(fmt.Sprintf("[%s] Error querying existing leads for deduplication: %v", contextLog, err))
+			return tempLeads, err
+		}
 	}
 
-	if len(names) > 0 {
-		query = query.Or(tx.Where("name IN ? AND industry_type = ? AND location = ?", names, industry, location))
-	}
-
-	if err := query.Find(&existingLeads).Error; err != nil {
-		log.Error(fmt.Sprintf("[%s] Error querying existing leads for deduplication: %v", contextLog, err))
-		return tempLeads, err
-	}
-
-	// Build maps of existing leads for quick lookup
-	existingWebsites := make(map[string]bool)
-	existingNameLocationIndustry := make(map[string]bool)
-
+	// Build lookup maps from DB records.
+	dbWebsites := make(map[string]bool)
+	dbNameKey := make(map[string]bool)
 	for _, existing := range existingLeads {
 		if existing.Website != "" {
-			existingWebsites[existing.Website] = true
+			dbWebsites[existing.Website] = true
 		}
 		if existing.Name != "" {
 			key := fmt.Sprintf("%s|%s|%s", existing.Name, existing.IndustryType, existing.Location)
-			existingNameLocationIndustry[key] = true
+			dbNameKey[key] = true
 		}
 	}
 
-	// Filter out duplicates: only keep leads that don't already exist
+	// Filter duplicates.
+	// seenURL and seenNameKey track leads already accepted in THIS batch so that
+	// the same lead scraped multiple times (re-used DOM elements across scroll
+	// iterations) is only inserted once even when the DB hasn't seen it yet.
+	seenURL := make(map[string]bool)
+	seenNameKey := make(map[string]bool)
+
 	var uniqueLeads []Lead
 	for _, lead := range tempLeads {
 		isDuplicate := false
 
-		// Check if website already exists
-		if lead.URL != "" && existingWebsites[lead.URL] {
+		// 1. Check against DB records.
+		if lead.URL != "" && dbWebsites[lead.URL] {
 			isDuplicate = true
 		}
-
-		// Check if name+location+industry combination already exists
 		if !isDuplicate && lead.Name != "" {
 			key := fmt.Sprintf("%s|%s|%s", lead.Name, industry, location)
-			if existingNameLocationIndustry[key] {
+			if dbNameKey[key] {
+				isDuplicate = true
+			}
+		}
+
+		// 2. Check against leads already accepted earlier in this same batch.
+		if !isDuplicate && lead.URL != "" && seenURL[lead.URL] {
+			isDuplicate = true
+		}
+		if !isDuplicate && lead.Name != "" {
+			key := fmt.Sprintf("%s|%s|%s", lead.Name, industry, location)
+			if seenNameKey[key] {
 				isDuplicate = true
 			}
 		}
 
 		if !isDuplicate {
 			uniqueLeads = append(uniqueLeads, lead)
+			// Register in the in-batch seen maps so subsequent occurrences are filtered.
+			if lead.URL != "" {
+				seenURL[lead.URL] = true
+			}
+			if lead.Name != "" {
+				seenNameKey[fmt.Sprintf("%s|%s|%s", lead.Name, industry, location)] = true
+			}
 		}
 	}
 
@@ -200,9 +232,12 @@ func saveLead(db *gorm.DB, log logger.Logger, jobID uuid.UUID, tempLeads []Lead,
 			})
 		}
 
-		// Batch insert new leads
+		// Batch insert new leads.
+		// DoNothing ensures that if a duplicate somehow slips through the
+		// application-level dedup (e.g. a concurrent job), the DB constraint
+		// silently skips it instead of rolling back the whole transaction.
 		if len(batchLeads) > 0 {
-			if err := tx.Create(&batchLeads).Error; err != nil {
+			if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&batchLeads).Error; err != nil {
 				return err
 			}
 		}
@@ -332,8 +367,9 @@ func ScrapeGoogleMapsLeads(ctx context.Context, db *gorm.DB, cfg *config.Config,
 
 			log.Info(fmt.Sprintf("[GoogleMaps] Session Collected: %d (Total job count: %d/%d)", len(results), initialLeadsCollected+len(results), target))
 
-			// Check if we hit the checkpoint size EXACTLY, or if it's the last lead
-			if int64(len(tempLeads)) == cfg.CheckpointNumberOfLeads || initialLeadsCollected+len(results) >= target {
+			// Flush when the checkpoint batch size is reached (>=, not ==, so a large
+			// batch can never skip past the threshold) or when the target is hit.
+			if int64(len(tempLeads)) >= cfg.CheckpointNumberOfLeads || initialLeadsCollected+len(results) >= target {
 				var saveErr error
 				var stop bool
 				tempLeads, stop, saveErr = saveLead(db, log, jobID, tempLeads, industry, location, "Checkpoint")
@@ -345,6 +381,22 @@ func ScrapeGoogleMapsLeads(ctx context.Context, db *gorm.DB, cfg *config.Config,
 					log.Info(fmt.Sprintf("[GoogleMaps] Stopping early due to quota reached"))
 					return nil
 				}
+			}
+		}
+
+		// Flush any leads that accumulated but didn't reach the checkpoint threshold
+		// (e.g. last partial batch before the outer loop condition becomes false).
+		if len(tempLeads) > 0 {
+			var saveErr error
+			var stop bool
+			tempLeads, stop, saveErr = saveLead(db, log, jobID, tempLeads, industry, location, "PostBatch Flush")
+			if saveErr != nil {
+				log.Info(fmt.Sprintf("[GoogleMaps] Stopping early due to save issue or limit: %v", saveErr))
+				return saveErr
+			}
+			if stop {
+				log.Info(fmt.Sprintf("[GoogleMaps] Stopping early due to quota reached"))
+				return nil
 			}
 		}
 	}
