@@ -401,6 +401,20 @@ func ScrapeGoogleMapsLeads(ctx context.Context, db *gorm.DB, cfg *config.Config,
 		}
 	}
 
+	// All target leads have been scraped (outer loop exited normally).
+	// Mark the job COMPLETED regardless of how many were unique after dedup —
+	// completion means we finished scraping the requested number of raw leads,
+	// not that all of them survived deduplication.
+	if db != nil && jobID != uuid.Nil {
+		if err := db.Model(&model.LeadScrapingJob{}).
+			Where("id = ?", jobID).
+			Update("status", model.JobStatusCompleted).Error; err != nil {
+			log.Error(fmt.Sprintf("[GoogleMaps] Failed to mark job %s as COMPLETED: %v", jobID, err))
+			return err
+		}
+		log.Info(fmt.Sprintf("[GoogleMaps] Job %s marked COMPLETED after scraping %d/%d leads", jobID, initialLeadsCollected+len(results), target))
+	}
+
 	return nil
 }
 

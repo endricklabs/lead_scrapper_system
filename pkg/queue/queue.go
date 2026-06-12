@@ -3,7 +3,6 @@ package queue
 import (
 	"fmt"
 	"lead_scrapper_be/internal/config"
-	"lead_scrapper_be/internal/model"
 	"lead_scrapper_be/pkg/logger"
 	"lead_scrapper_be/pkg/scrapper"
 
@@ -77,9 +76,11 @@ func worker(id int, jobs <-chan Job, db *gorm.DB, cfg *config.Config, log logger
 
 		if err != nil {
 			log.Error(fmt.Sprintf("Error processing job: %v", err))
-		} else {
-			db.Model(&model.LeadScrapingJob{}).Where("id = ?", job.JobID).Update("status", "COMPLETED")
 		}
+		// Status (COMPLETED / PENDING) is managed by the scraper itself based on
+		// whether all requested leads were actually scraped. The worker must not
+		// override it here, otherwise a partially-scraped job would be wrongly
+		// marked COMPLETED and never retried.
 
 	}
 }
