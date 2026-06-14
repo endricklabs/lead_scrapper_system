@@ -6,6 +6,7 @@ import (
 	"lead_scrapper_be/internal/config"
 	"lead_scrapper_be/internal/model"
 	"lead_scrapper_be/pkg/logger"
+	"net/url"
 	"time"
 
 	"github.com/chromedp/chromedp"
@@ -376,14 +377,142 @@ func ScrapGoogleMaps(db *gorm.DB, cfg *config.Config, log logger.Logger, jobID u
 	return nil
 }
 
-func ScrapLinkedIn(db *gorm.DB, cfg *config.Config, log logger.Logger, jobID uuid.UUID, industryType, location string, numberOfRequest int) error {
-	fmt.Printf("[LinkedIn Scraper] Scraping leads for %s in %s...\n", industryType, location)
-	// Placeholder
+
+func ScrapFacebookLeads(ctx context.Context, db *gorm.DB, cfg *config.Config, log logger.Logger, jobID uuid.UUID, industry, location string, target int) error {
+
+	// Resume logic
+	var initialLeadsCollected int
+	if db != nil && jobID != uuid.Nil {
+		var job model.LeadScrapingJob
+		if err := db.Select("leads_collected").First(&job, "id = ?", jobID).Error; err == nil {
+			initialLeadsCollected = job.LeadsCollected
+		} else {
+			log.Error(fmt.Sprintf("Could not fetch job %s for initial leads count: %v", jobID, err))
+		}
+	}
+
+	if initialLeadsCollected >= target {
+		log.Info(fmt.Sprintf("Job %s already reached target (%d/%d leads). Skipping scraping.", jobID, initialLeadsCollected, target))
+		return nil
+	}
+
+	query := fmt.Sprintf("site:facebook.com %s in %s", industry, location)
+	searchURL := "https://www.google.com/search?q=" + url.QueryEscape(query)
+
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(searchURL),
+		chromedp.Sleep(6*time.Second),
+	); err != nil {
+		return err
+	}
+
+	results := []Lead{}
+	tempLeads := []Lead{}
+	seen := map[string]bool{}
+
+	for initialLeadsCollected+len(results) < target {
+		var batch []Lead
+
+		err := chromedp.Run(ctx,
+			chromedp.WaitVisible(`#center_col`, chromedp.ByQuery),
+			chromedp.Evaluate(`
+			(() => {
+				const items = document.querySelectorAll('a.zReHs');
+				return Array.from(items).map(el => ({
+					Name: el.querySelector('h3')?.innerText || '',
+					URL: el.href
+				}));
+			})()
+			`, &batch),
+			chromedp.Sleep(2*time.Second),
+		)
+
+		if err != nil {
+			var stop bool
+			tempLeads, stop, _ = saveLead(db, log, jobID, tempLeads, industry, location, "Error Save")
+			if stop {
+				return nil
+			}
+			return err
+		}
+
+		for _, b := range batch {
+			if initialLeadsCollected+len(results) >= target {
+				break
+			}
+
+			if b.Name == "" || seen[b.URL] {
+				continue
+			}
+
+			seen[b.URL] = true
+			results = append(results, b)
+			tempLeads = append(tempLeads, b)
+
+			log.Info(fmt.Sprintf("[Facebook] Session Collected: %d (Total job count: %d/%d)", len(results), initialLeadsCollected+len(results), target))
+
+			if int64(len(tempLeads)) == cfg.CheckpointNumberOfLeads || initialLeadsCollected+len(results) >= target {
+				var stop bool
+				var saveErr error
+				tempLeads, stop, saveErr = saveLead(db, log, jobID, tempLeads, industry, location, "Checkpoint")
+				if saveErr != nil {
+					log.Info(fmt.Sprintf("[Facebook] Stopping early due to save issue or limit: %v", saveErr))
+					return saveErr
+				}
+				if stop {
+					log.Info("[Facebook] Stopping early due to quota reached")
+					return nil
+				}
+			}
+		}
+
+		// Paginate to next Google search results page
+		var nextExists bool
+		if err := chromedp.Run(ctx,
+			chromedp.Evaluate(`!!document.querySelector('a#pnnext')`, &nextExists),
+		); err != nil || !nextExists {
+			log.Info("[Facebook] No more pages.")
+			break
+		}
+
+		if err := chromedp.Run(ctx,
+			chromedp.Click(`a#pnnext`, chromedp.ByQuery),
+			chromedp.Sleep(3*time.Second),
+		); err != nil {
+			log.Error(fmt.Sprintf("[Facebook] Pagination failed: %v", err))
+			break
+		}
+	}
+
 	return nil
 }
 
 func ScrapFacebook(db *gorm.DB, cfg *config.Config, log logger.Logger, jobID uuid.UUID, industryType, location string, numberOfRequest int) error {
-	fmt.Printf("[Facebook Scraper] Scraping leads for %s in %s...\n", industryType, location)
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Flag("headless", true),
+		chromedp.Flag("no-sandbox", true),
+	)
+
+	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
+	defer cancel()
+
+	ctx, cancel := chromedp.NewContext(allocCtx)
+	defer cancel()
+
+	ctx, cancel = context.WithTimeout(ctx, 180*time.Second)
+	defer cancel()
+
+	if err := ScrapFacebookLeads(ctx, db, cfg, log, jobID, industryType, location, numberOfRequest); err != nil {
+		log.Error(fmt.Sprintf("[Facebook] Scraping failed: %v", err))
+		return err
+	}
+
+	return nil
+}
+
+
+func ScrapLinkedIn(db *gorm.DB, cfg *config.Config, log logger.Logger, jobID uuid.UUID, industryType, location string, numberOfRequest int) error {
+	fmt.Printf("[LinkedIn Scraper] Scraping leads for %s in %s...\n", industryType, location)
 	// Placeholder
 	return nil
 }
